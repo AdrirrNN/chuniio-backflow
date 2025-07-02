@@ -1,0 +1,32 @@
+[package]
+name = "chuniio-backflow"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+name = "chuniio_backflow"
+
+[profile.release]
+strip = true      # Automatically strip symbols from the binary.
+opt-level = "z"   # Optimize for size.
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[dependencies]
+winapi = { version = "0.3.9", features = [
+    "minwindef",
+    "winnt",
+    "winerror",
+    "winbase",
+    "winuser",
+    "processenv",
+] }
+windows = { version = "0.58.0", features = [
+    "Win32_Networking_WinSock",
+    "Win32_System_LibraryLoader",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
