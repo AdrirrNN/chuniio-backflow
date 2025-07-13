@@ -30,6 +30,15 @@ pub enum ChuniMessage {
     Ping,
     /// Keepalive pong response
     Pong,
+    /// JVS full state read request
+    JvsFullStateRead,
+    /// JVS full state read response
+    JvsFullStateReadResponse {
+        opbtn: u8,
+        beams: u8,
+        pressure: [u8; 32],
+        coin_counter: u16,
+    },
 }
 
 /// Message type IDs
@@ -45,6 +54,8 @@ impl ChuniMessage {
     pub const LED_UPDATE: u8 = 0x07;
     pub const PING: u8 = 0x08;
     pub const PONG: u8 = 0x09;
+    pub const JVS_FULL_STATE_READ: u8 = 0x0C;
+    pub const JVS_FULL_STATE_READ_RESPONSE: u8 = 0x0D;
 
     /// Serialize message to bytes
     pub fn serialize(&self) -> Vec<u8> {
@@ -93,6 +104,21 @@ impl ChuniMessage {
             }
             ChuniMessage::Pong => {
                 data.push(Self::PONG);
+            }
+            ChuniMessage::JvsFullStateRead => {
+                data.push(Self::JVS_FULL_STATE_READ);
+            }
+            ChuniMessage::JvsFullStateReadResponse {
+                opbtn,
+                beams,
+                pressure,
+                coin_counter,
+            } => {
+                data.push(Self::JVS_FULL_STATE_READ_RESPONSE);
+                data.push(*opbtn);
+                data.push(*beams);
+                data.extend_from_slice(pressure);
+                data.extend_from_slice(&coin_counter.to_le_bytes());
             }
         }
 
@@ -165,6 +191,24 @@ impl ChuniMessage {
             }
             Self::PING => Ok(ChuniMessage::Ping),
             Self::PONG => Ok(ChuniMessage::Pong),
+            Self::JVS_FULL_STATE_READ => Ok(ChuniMessage::JvsFullStateRead),
+            Self::JVS_FULL_STATE_READ_RESPONSE => {
+                let mut opbtn = [0u8; 1];
+                let mut beams = [0u8; 1];
+                let mut pressure = [0u8; 32];
+                let mut coin_bytes = [0u8; 2];
+                cursor.read_exact(&mut opbtn)?;
+                cursor.read_exact(&mut beams)?;
+                cursor.read_exact(&mut pressure)?;
+                cursor.read_exact(&mut coin_bytes)?;
+                let coin_counter = u16::from_le_bytes(coin_bytes);
+                Ok(ChuniMessage::JvsFullStateReadResponse {
+                    opbtn: opbtn[0],
+                    beams: beams[0],
+                    pressure,
+                    coin_counter,
+                })
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("Unknown message type: {}", message_type[0]),

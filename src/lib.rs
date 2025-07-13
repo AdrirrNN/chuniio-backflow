@@ -204,128 +204,149 @@ unsafe fn recover_connection() -> bool {
 
 /// Send a message with automatic connection recovery
 unsafe fn send_message_with_recovery(message: &ChuniMessage) -> Option<ChuniMessage> {
-    if let Ok(state) = GLOBAL_STATE.lock() {
-        if let Some(sock) = state.socket {
-            // Try to send with existing connection
-            let result = send_message(sock, message);
-            if result.is_some() {
-                return result;
-            }
-        }
-    }
-
-    // If we get here, either no connection or send failed
-    // Try to recover connection and retry once
-    if recover_connection() {
+    // Always drop the lock before network I/O
+    let sock = {
         if let Ok(state) = GLOBAL_STATE.lock() {
-            if let Some(sock) = state.socket {
-                debug!("Retrying message send after connection recovery");
-                return send_message(sock, message);
+            state.socket
+        } else {
+            error!("send_message_with_recovery: failed to acquire global state lock");
+            return None;
+        }
+    };
+    if let Some(sock) = sock {
+        let result = send_message(sock, message);
+        if result.is_some() {
+            return result;
+        } else {
+            error!(
+                "send_message_with_recovery: send_message failed for {:?}, attempting recovery",
+                message
+            );
+        }
+    } else {
+        warn!("send_message_with_recovery: no socket, attempting recovery");
+    }
+    // If we get here, either no connection or send failed
+    if recover_connection() {
+        let sock = {
+            if let Ok(state) = GLOBAL_STATE.lock() {
+                state.socket
+            } else {
+                error!("send_message_with_recovery: failed to acquire global state lock after recovery");
+                return None;
             }
+        };
+        if let Some(sock) = sock {
+            debug!(
+                "Retrying message send after connection recovery: {:?}",
+                message
+            );
+            return send_message(sock, message);
         }
     }
-
+    error!(
+        "send_message_with_recovery: failed to send message after recovery: {:?}",
+        message
+    );
     None
 }
 
-/// Send a message to the chuniio proxy and optionally receive a response
 unsafe fn send_message(sock: SOCKET, message: &ChuniMessage) -> Option<ChuniMessage> {
-    // Serialize message
     let data = message.serialize();
-
-    // Only log detailed info for non-polling messages to reduce noise
-    match message {
-        ChuniMessage::JvsPoll | ChuniMessage::CoinCounterRead | ChuniMessage::SliderStateRead => {
-            // Silent for frequent operations
-        }
-        _ => {
-            debug!("Sending message: {:?} ({} bytes)", message, data.len());
-        }
-    }
-
-    // Send message
-    if send(sock, &data, SEND_RECV_FLAGS(0)) == SOCKET_ERROR {
-        match message {
-            ChuniMessage::JvsPoll
-            | ChuniMessage::CoinCounterRead
-            | ChuniMessage::SliderStateRead => {
-                // Silent for frequent operations
-            }
-            _ => {
-                error!("Failed to send message to chuniio proxy");
-            }
-        }
-        return None;
-    }
-
-    // For messages that expect a response, try to receive it
     match message {
         ChuniMessage::JvsPoll
         | ChuniMessage::CoinCounterRead
         | ChuniMessage::SliderStateRead
-        | ChuniMessage::Ping => {
+        | ChuniMessage::JvsFullStateRead => {}
+        _ => debug!("Sending message: {:?} ({} bytes)", message, data.len()),
+    }
+    if send(sock, &data, SEND_RECV_FLAGS(0)) == SOCKET_ERROR {
+        error!("send_message: failed to send message {:?}", message);
+        return None;
+    }
+    match message {
+        ChuniMessage::JvsPoll
+        | ChuniMessage::CoinCounterRead
+        | ChuniMessage::SliderStateRead
+        | ChuniMessage::Ping
+        | ChuniMessage::JvsFullStateRead => {
             let mut buffer = [0u8; 1024];
             let bytes_received = recv(sock, &mut buffer, SEND_RECV_FLAGS(0));
-
             if bytes_received > 0 {
                 match ChuniMessage::deserialize(&buffer[..bytes_received as usize]) {
                     Ok(response) => {
-                        // Only log non-polling responses to reduce noise
                         match response {
                             ChuniMessage::JvsPollResponse { .. }
                             | ChuniMessage::CoinCounterReadResponse { .. }
                             | ChuniMessage::SliderStateReadResponse { .. }
-                            | ChuniMessage::Pong => {
-                                // Silent for frequent operations
-                            }
-                            _ => {
-                                debug!("Received response from chuniio proxy: {:?}", response);
-                            }
+                            | ChuniMessage::Pong
+                            | ChuniMessage::JvsFullStateReadResponse { .. } => {}
+                            _ => debug!("Received response from chuniio proxy: {:?}", response),
                         }
                         Some(response)
                     }
                     Err(e) => {
-                        error!("Failed to deserialize response: {:?}", e);
+                        error!(
+                            "send_message: failed to deserialize response for {:?}: {:?}",
+                            message, e
+                        );
                         None
                     }
                 }
             } else {
-                match message {
-                    ChuniMessage::JvsPoll
-                    | ChuniMessage::CoinCounterRead
-                    | ChuniMessage::SliderStateRead => {
-                        // Silent for frequent operations
-                    }
-                    _ => {
-                        error!(
-                            "Failed to receive response from chuniio proxy (received {} bytes)",
-                            bytes_received
-                        );
-                    }
-                }
+                error!(
+                    "send_message: failed to receive response for {:?} (received {} bytes)",
+                    message, bytes_received
+                );
                 None
             }
         }
         _ => {
-            debug!("Message sent (no response expected)");
-            None // No response expected
+            debug!("Message sent (no response expected): {:?}", message);
+            None
         }
     }
 }
 
-/// Send a message to the chuniio proxy without waiting for a response (fire-and-forget)
-/// This is similar to how the reference implementation sends to named pipes
 unsafe fn send_message_fire_and_forget(message: &ChuniMessage) {
-    if let Ok(state) = GLOBAL_STATE.lock() {
-        if let Some(sock) = state.socket {
-            // Serialize message
-            let data = message.serialize();
-
-            // Send message without waiting for response
-            if send(sock, &data, SEND_RECV_FLAGS(0)) == SOCKET_ERROR {
-                // Silently fail like reference implementation does with broken pipes
-            }
+    let sock = {
+        if let Ok(state) = GLOBAL_STATE.lock() {
+            state.socket
+        } else {
+            error!("send_message_fire_and_forget: failed to acquire global state lock");
+            return;
         }
+    };
+    if let Some(sock) = sock {
+        let data = message.serialize();
+        if send(sock, &data, SEND_RECV_FLAGS(0)) == SOCKET_ERROR {
+            error!(
+                "send_message_fire_and_forget: failed to send message {:?}",
+                message
+            );
+        }
+    }
+}
+
+/// Synchronize the full IO state from the proxy and update GlobalState
+unsafe fn sync_full_io_state_from_proxy() {
+    let response = send_message_with_recovery(&ChuniMessage::JvsFullStateRead);
+    if let Some(ChuniMessage::JvsFullStateReadResponse {
+        opbtn,
+        beams,
+        coin_counter,
+        pressure,
+    }) = response
+    {
+        if let Ok(mut state) = GLOBAL_STATE.lock() {
+            state.jvs_state.opbtn = opbtn;
+            state.jvs_state.beams = beams;
+            state.coin_counter.store(coin_counter, Ordering::Relaxed);
+            state.slider_pressure = pressure;
+            debug!("GlobalState synchronized from proxy: opbtn={:02x}, beams={:02x}, coin_counter={}, slider_pressure[..4]={:?}", opbtn, beams, coin_counter, &pressure[..4]);
+        }
+    } else {
+        warn!("Failed to synchronize full IO state from proxy");
     }
 }
 
@@ -458,24 +479,13 @@ pub unsafe extern "C" fn chuni_io_jvs_poll(opbtn: *mut u8, beams: *mut u8) {
         if state.socket.is_some() {
             drop(state); // Release lock before socket operation
 
-            // Send JVS poll request with very short timeout
-            let message = ChuniMessage::JvsPoll;
-            if let Some(response) = send_message_with_recovery(&message) {
-                if let ChuniMessage::JvsPollResponse {
-                    opbtn: op,
-                    beams: ir,
-                } = response
-                {
-                    // Update state for next call
-                    if let Ok(mut state) = GLOBAL_STATE.try_lock() {
-                        state.jvs_state.opbtn = op;
-                        state.jvs_state.beams = ir;
+            // Synchronize full IO state from proxy
+            sync_full_io_state_from_proxy();
 
-                        // Return the updated state
-                        *opbtn = op;
-                        *beams = ir;
-                    }
-                }
+            // Return updated state
+            if let Ok(state) = GLOBAL_STATE.try_lock() {
+                *opbtn = state.jvs_state.opbtn;
+                *beams = state.jvs_state.beams;
             }
         }
     } else {
@@ -502,15 +512,12 @@ pub unsafe extern "C" fn chuni_io_jvs_read_coin_counter(total: *mut u16) {
         if state.socket.is_some() {
             drop(state); // Release lock before socket operation
 
-            // Send coin counter read request
-            let message = ChuniMessage::CoinCounterRead;
-            if let Some(response) = send_message_with_recovery(&message) {
-                if let ChuniMessage::CoinCounterReadResponse { count } = response {
-                    if let Ok(state) = GLOBAL_STATE.try_lock() {
-                        state.coin_counter.store(count, Ordering::Relaxed);
-                        *total = count; // Return the updated count
-                    }
-                }
+            // Synchronize full IO state from proxy
+            sync_full_io_state_from_proxy();
+
+            // Return updated count
+            if let Ok(state) = GLOBAL_STATE.try_lock() {
+                *total = state.coin_counter.load(Ordering::Relaxed);
             }
         }
     } else {
@@ -585,45 +592,13 @@ pub unsafe extern "C" fn chuni_io_slider_start(callback: *const c_void) {
                 .map(|s| s.slider_active.load(Ordering::SeqCst))
                 .unwrap_or(false)
             {
-                // Query proxy for current slider state and call callback with it
-                if let Ok(state) = GLOBAL_STATE.lock() {
-                    // Try to get updated slider data from proxy
-                    if let Some(_sock) = state.socket {
-                        drop(state); // Release lock before socket operation
+                // Synchronize full IO state from proxy (includes slider)
+                sync_full_io_state_from_proxy();
 
-                        // Send slider state read request to get current state
-                        let request = ChuniMessage::SliderStateRead;
-                        if let Some(response) = send_message_with_recovery(&request) {
-                            if let ChuniMessage::SliderStateReadResponse { pressure } = response {
-                                // Update cached state with response from proxy
-                                if let Ok(mut state) = GLOBAL_STATE.lock() {
-                                    state.slider_pressure = pressure;
-                                    // Call callback with updated data
-                                    if let Some(callback) = state.slider_callback {
-                                        callback(state.slider_pressure.as_ptr());
-                                    }
-                                }
-                            } else {
-                                // Unexpected response, use cached data
-                                if let Ok(state) = GLOBAL_STATE.lock() {
-                                    if let Some(callback) = state.slider_callback {
-                                        callback(state.slider_pressure.as_ptr());
-                                    }
-                                }
-                            }
-                        } else {
-                            // No response from proxy, use cached data
-                            if let Ok(state) = GLOBAL_STATE.lock() {
-                                if let Some(callback) = state.slider_callback {
-                                    callback(state.slider_pressure.as_ptr());
-                                }
-                            }
-                        }
-                    } else {
-                        // No connection, call callback with empty state
-                        if let Some(callback) = state.slider_callback {
-                            callback(state.slider_pressure.as_ptr());
-                        }
+                // Call callback with updated slider data
+                if let Ok(state) = GLOBAL_STATE.lock() {
+                    if let Some(callback) = state.slider_callback {
+                        callback(state.slider_pressure.as_ptr());
                     }
                 }
 
