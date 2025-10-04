@@ -18,7 +18,8 @@ jobs:
       uses: actions-rs/toolchain@v1
       with:
         toolchain: stable
-        target: x86_64-pc-windows-gnu, i686-pc-windows-gnu
+        # Corrected: Use spaces to separate targets
+        target: x86_64-pc-windows-gnu i686-pc-windows-gnu
         override: true
 
     - name: Build for x86_64-pc-windows-gnu
@@ -34,3 +35,4 @@ jobs:
         path: |
           target/x86_64-pc-windows-gnu/release/chuniio_backflow.dll
           target/i686-pc-windows-gnu/release/chuniio_backflow.dll
+
