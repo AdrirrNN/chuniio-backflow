@@ -20,11 +20,12 @@ jobs:
         toolchain: stable
         override: true
 
-    - name: Add x86_64-pc-windows-gnu target
-      run: rustup target add x86_64-pc-windows-gnu
+    - name: Add Windows targets
+      run: rustup target add x86_64-pc-windows-gnu i686-pc-windows-gnu
 
-    - name: Add i686-pc-windows-gnu target
-      run: rustup target add i686-pc-windows-gnu
+    # Add this step to install the required linker
+    - name: Install MinGW-w64 linker
+      run: sudo apt-get update && sudo apt-get install -y mingw-w64
 
     - name: Build for x86_64-pc-windows-gnu
       run: cargo build --release --target x86_64-pc-windows-gnu
@@ -39,4 +40,3 @@ jobs:
         path: |
           target/x86_64-pc-windows-gnu/release/chuniio_backflow.dll
           target/i686-pc-windows-gnu/release/chuniio_backflow.dll
-
